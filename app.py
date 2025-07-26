@@ -7,15 +7,15 @@ import shutil
 import random
 import logging
 import re
+from contextlib import asynccontextmanager # New import for lifespan
 from fastapi import FastAPI, Request, HTTPException, status
-from fastapi.responses import FileResponse # Not used directly for bot, but good to keep if needed
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
 # For Telegram Webhook handling
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ExtBot # Removed PicklePersistence as it's not needed for stateless Cloud Run
-
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ExtBot
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -45,12 +45,54 @@ def load_cookies():
 
 COOKIES = load_cookies()
 
-# --- FastAPI Application Setup ---
+# --- Telegram Bot Application Setup ---
+# Initialize Application globally, but don't start it yet.
+# We will initialize/start it within FastAPI's lifespan.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
+if not TELEGRAM_BOT_TOKEN:
+    log.critical("❌ TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
+    sys.exit(1)
+
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+# Add handlers
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_download))
+
+
+# --- FastAPI Application Setup with Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles startup and shutdown events for the FastAPI application.
+    This is where python-telegram-bot's Application will be initialized.
+    """
+    log.info("FastAPI app starting up. Initializing Telegram Application...")
+    try:
+        await application.initialize()
+        log.info("Telegram Application initialized successfully.")
+    except Exception as e:
+        log.critical(f"Failed to initialize Telegram Application: {e}", exc_info=True)
+        sys.exit(1) # Exit if bot fails to initialize
+
+    yield # This yields control to the FastAPI application to handle requests
+
+    log.info("FastAPI app shutting down. Shutting down Telegram Application...")
+    try:
+        await application.shutdown()
+        log.info("Telegram Application shut down gracefully.")
+    except Exception as e:
+        log.error(f"Error during Telegram Application shutdown: {e}", exc_info=True)
+
+
 app = FastAPI(
     title="Telegram Bot Backend",
     description="Processes Telegram messages to download videos.",
     version="1.0.0",
+    lifespan=lifespan # Link the lifespan manager to the FastAPI app
 )
+
 
 # --- Async Shell Executor ---
 async def run_command(command: str) -> tuple[int, str, str]:
@@ -64,7 +106,7 @@ async def run_command(command: str) -> tuple[int, str, str]:
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
-# --- Telegram Bot Handlers ---
+# --- Telegram Bot Handlers (defined after application is built) ---
 async def start_command(update: Update, context):
     await update.message.reply_text("👋 Hello! Send me any Instagram Reel, Post, or IGTV link, and I'll try to download it for you.")
 
@@ -125,7 +167,6 @@ async def handle_video_download(update: Update, context):
                     last_error = stderr
                     log.warning(f"[{session_id}] yt-dlp metadata failed (Attempt {attempt_num}): {last_error}")
                     if "No address associated with hostname" in last_error and is_instagram_url:
-                        # This specific error points to network issues, not cookie issues
                         raise RuntimeError("Network block detected for Instagram. Instagram downloads might not work from this server.")
                     elif "login is required" in last_error.lower() and is_instagram_url:
                         attempts_left -= 1
@@ -194,7 +235,7 @@ async def handle_video_download(update: Update, context):
                     )
                 
                 await status_message.delete()
-                return # Success, exit loop
+                return
 
             except Exception as e:
                 log.warning(f"[{session_id}] Attempt {attempt_num} failed with error: {e}")
@@ -246,26 +287,9 @@ async def handle_video_download(update: Update, context):
             shutil.rmtree(session_path)
 
 
-# --- Google Cloud Run & Telegram Webhook Setup ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-
-if not TELEGRAM_BOT_TOKEN:
-    log.critical("❌ TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
-    sys.exit(1)
-
-# Initialize Application (no persistence needed for stateless Cloud Run)
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-# Add handlers
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_download))
-
 # --- FastAPI Endpoint to receive Telegram Webhooks ---
 @app.post("/telegram_webhook")
 async def telegram_webhook(request: Request):
-    """
-    Receives Telegram webhook updates and processes them.
-    """
     log.info("Received Telegram webhook.")
     try:
         data = await request.json()
