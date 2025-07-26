@@ -32,5 +32,5 @@ RUN pip install --no-cache-dir \
 ENV PYTHONUNBUFFERED=1
 
 # Command to run the FastAPI application using Uvicorn.
-# CRITICAL FIX: Listen on the PORT environment variable provided by Cloud Run.
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "${PORT}", "--log-level", "info"]
+# CRITICAL FIX: Use /bin/sh -c to ensure environment variable expansion.
+CMD ["/bin/sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080} --log-level info"]
