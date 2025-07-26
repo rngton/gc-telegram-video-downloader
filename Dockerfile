@@ -32,6 +32,5 @@ RUN pip install --no-cache-dir \
 ENV PYTHONUNBUFFERED=1
 
 # Command to run the FastAPI application using Uvicorn.
-# Cloud Run automatically injects the PORT environment variable.
-# We tell Uvicorn to listen on this port. The ':-8080' provides a default if PORT isn't set (e.g. for local testing).
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "${PORT:-8080}", "--log-level", "info"]
+# CRITICAL FIX: Listen on the PORT environment variable provided by Cloud Run.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "${PORT}", "--log-level", "info"]
